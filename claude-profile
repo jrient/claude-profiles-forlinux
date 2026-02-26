@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+# Claude Settings Profile Manager
+# 管理 ~/.claude/settings.json 的多个配置文件
+
+set -euo pipefail
+
+# 配置路径
+CLAUDE_DIR="${HOME}/.claude"
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
+PROFILES_DIR="${CLAUDE_DIR}/profiles"
+BACKUPS_DIR="${CLAUDE_DIR}/backups"
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+GRAY='\033[0;90m'
+NC='\033[0m' # No Color
+
+# 打印带颜色的消息
+info() { echo -e "${BLUE}ℹ${NC} $*"; }
+success() { echo -e "${GREEN}✓${NC} $*"; }
+warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+error() { echo -e "${RED}✗${NC} $*"; }
+
+# 初始化目录
+init_dirs() {
+    mkdir -p "${PROFILES_DIR}" "${BACKUPS_DIR}"
+}
+
+# 检查 settings.json 是否存在
+check_settings() {
+    if [[ ! -f "${SETTINGS_FILE}" ]]; then
+        error "settings.json 不存在于 ${SETTINGS_FILE}"
+        exit 1
+    fi
+}
+
+# 获取当前配置的摘要
+get_profile_summary() {
+    local file="$1"
+    local model=$(jq -r '.model // "未设置"' "$file" 2>/dev/null || echo "未知")
+    local mcp_count=$(jq -r '[.enabledMcpServers[]?] | length' "$file" 2>/dev/null || echo "0")
+    echo "model=${model}, mcp=${mcp_count}"
+}
+
+# 列出所有配置文件
+list_profiles() {
+    init_dirs
+
+    echo -e "\n${CYAN}📋 可用的配置文件:${NC}"
+    echo
+
+    # 显示当前配置摘要
+    local current_summary=$(get_profile_summary "${SETTINGS_FILE}")
+    echo -e "${GREEN}● (当前)${GRAY}   ${current_summary}${NC}"
+
+    # 列出所有配置库中的配置
+    if [[ -d "${PROFILES_DIR}" ]] && [[ -n "$(ls -A "${PROFILES_DIR}" 2>/dev/null)" ]]; then
+        for profile in "${PROFILES_DIR}"/*.json; do
+            if [[ -f "$profile" ]]; then
+                local name=$(basename "$profile" .json)
+                local summary=$(get_profile_summary "$profile")
+                echo -e "  ${name}${GRAY}  ${summary}${NC}"
+            fi
+        done
+    fi
+
+    # 列出备份
+    if [[ -d "${BACKUPS_DIR}" ]] && [[ -n "$(ls -A "${BACKUPS_DIR}" 2>/dev/null)" ]]; then
+        echo
+        echo -e "${CYAN}📦 备份:${NC}"
+        for backup in "${BACKUPS_DIR}"/*.json; do
+            if [[ -f "$backup" ]]; then
+                local name=$(basename "$backup" .json)
+                local summary=$(get_profile_summary "$backup")
+                echo -e "  ${name}${GRAY}  ${summary}${NC}"
+            fi
+        done
+    fi
+    echo
+}
+
+# 保存当前配置
+save_profile() {
+    local name="$1"
+    init_dirs
+    check_settings
+
+    local target="${PROFILES_DIR}/${name}.json"
+
+    if [[ -f "${target}" ]]; then
+        warn "配置 '${name}' 已存在"
+        read -p "是否覆盖? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            info "已取消"
+            return
+        fi
+    fi
+
+    cp "${SETTINGS_FILE}" "${target}"
+    success "配置已保存: ${name}"
+}
+
+# 加载配置
+load_profile() {
+    local name="$1"
+    init_dirs
+    check_settings
+
+    local source="${PROFILES_DIR}/${name}.json"
+
+    if [[ ! -f "${source}" ]]; then
+        error "配置 '${name}' 不存在"
+        info "使用 'list' 查看可用配置"
+        exit 1
+    fi
+
+    # 先备份当前配置
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup="${BACKUPS_DIR}/before_load_${timestamp}.json"
+    cp "${SETTINGS_FILE}" "${backup}"
+    info "已备份当前配置: before_load_${timestamp}"
+
+    # 加载新配置
+    cp "${source}" "${SETTINGS_FILE}"
+    success "配置 '${name}' 已加载"
+}
+
+# 备份当前配置
+backup_profile() {
+    local name="${1:-auto}"
+    init_dirs
+    check_settings
+
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup="${BACKUPS_DIR}/${name}_${timestamp}.json"
+
+    cp "${SETTINGS_FILE}" "${backup}"
+    success "备份已创建: ${name}_${timestamp}"
+}
+
+# 恢复备份
+restore_backup() {
+    local name="$1"
+    init_dirs
+    check_settings
+
+    # 查找匹配的备份
+    local backup=""
+    for f in "${BACKUPS_DIR}"/${name}*.json; do
+        if [[ -f "$f" ]]; then
+            backup="$f"
+            break
+        fi
+    done
+
+    if [[ -z "$backup" ]] || [[ ! -f "$backup" ]]; then
+        error "备份 '${name}' 不存在"
+        info "使用 'list' 查看可用备份"
+        exit 1
+    fi
+
+    # 再次确认
+    warn "即将恢复备份: $(basename "$backup")"
+    read -p "确认继续? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        info "已取消"
+        return
+    fi
+
+    cp "$backup" "${SETTINGS_FILE}"
+    success "备份已恢复: $(basename "$backup")"
+}
+
+# 比较两个配置
+diff_profile() {
+    local name1="$1"
+    local name2="${2:-当前}"
+
+    local file1="${PROFILES_DIR}/${name1}.json"
+    local file2="${name2}" == "当前" ? "${SETTINGS_FILE}" : "${PROFILES_DIR}/${name2}.json"
+
+    if [[ ! -f "$file1" ]]; then
+        error "配置 '${name1}' 不存在"
+        exit 1
+    fi
+
+    if [[ ! -f "$file2" ]]; then
+        error "配置 '${name2}' 不存在"
+        exit 1
+    fi
+
+    diff -u "$file1" "$file2" || true
+}
+
+# 删除配置
+delete_profile() {
+    local name="$1"
+    init_dirs
+
+    local profile="${PROFILES_DIR}/${name}.json"
+
+    if [[ ! -f "${profile}" ]]; then
+        error "配置 '${name}' 不存在"
+        exit 1
+    fi
+
+    warn "即将删除配置: ${name}"
+    read -p "确认删除? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        info "已取消"
+        return
+    fi
+
+    rm "${profile}"
+    success "配置 '${name}' 已删除"
+}
+
+# 显示配置详情
+show_profile() {
+    local name="$1"
+
+    if [[ "$name" == "当前" ]] || [[ -z "$name" ]]; then
+        jq '.' "${SETTINGS_FILE}"
+        return
+    fi
+
+    local profile="${PROFILES_DIR}/${name}.json"
+
+    if [[ ! -f "${profile}" ]]; then
+        error "配置 '${name}' 不存在"
+        exit 1
+    fi
+
+    jq '.' "${profile}"
+}
+
+# 编辑配置
+edit_profile() {
+    local name="${1:-当前}"
+
+    if [[ "$name" == "当前" ]] || [[ -z "$name" ]]; then
+        "${EDITOR:-vi}" "${SETTINGS_FILE}"
+        return
+    fi
+
+    local profile="${PROFILES_DIR}/${name}.json"
+
+    if [[ ! -f "${profile}" ]]; then
+        error "配置 '${name}' 不存在"
+        exit 1
+    fi
+
+    "${EDITOR:-vi}" "${profile}"
+}
+
+# 交互式切换配置
+switch_profile() {
+    init_dirs
+    check_settings
+
+    # 收集所有配置
+    local profiles=()
+    local descriptions=()
+
+    # 添加当前配置
+    local current_summary=$(get_profile_summary "${SETTINGS_FILE}")
+    profiles+=("当前")
+    descriptions+=("${current_summary}")
+
+    # 添加 profiles 目录中的配置
+    if [[ -d "${PROFILES_DIR}" ]] && [[ -n "$(ls -A "${PROFILES_DIR}" 2>/dev/null)" ]]; then
+        for profile in "${PROFILES_DIR}"/*.json; do
+            if [[ -f "$profile" ]]; then
+                local name=$(basename "$profile" .json)
+                local summary=$(get_profile_summary "$profile")
+                profiles+=("$name")
+                descriptions+=("${summary}")
+            fi
+        done
+    fi
+
+    # 检查是否有配置可选
+    if [[ ${#profiles[@]} -eq 1 ]]; then
+        warn "没有找到可切换的配置文件"
+        info "使用 'save <名称>' 保存配置后再切换"
+        return
+    fi
+
+    local selected=""
+
+    # 优先使用 fzf（如果可用）
+    if command -v fzf &>/dev/null; then
+        # 构建预览内容
+        local preview_cmd="cat ~/.claude/settings.json 2>/dev/null | jq -C '.'"
+        if [[ "${FZF_PREVIEW_OPTS:-}" != "" ]]; then
+            preview_cmd="$FZF_PREVIEW_OPTS"
+        fi
+
+        # 使用 fzf 选择
+        {
+            for i in "${!profiles[@]}"; do
+                local name="${profiles[$i]}"
+                local desc="${descriptions[$i]}"
+                printf "%s\033[90m # %s\033[0m\n" "$name" "$desc"
+            done
+        } | fzf --height=40% --layout=reverse --prompt="选择配置 > " \
+            --header="使用 ↑↓ 选择，Enter 确认，Esc 取消" \
+            --ansi --no-multi \
+            --bind="ctrl-y:execute-silent(echo {} | cut -d' ' -f1 | xargs -I {} echo -n {} | pbcopy 2>/dev/null || true)" \
+            --preview="echo {} | cut -d' ' -f1 | xargs -I NAME bash -c 'if [[ \"NAME\" == \"当前\" ]]; then cat ~/.claude/settings.json; else cat ~/.claude/profiles/NAME.json 2>/dev/null; fi' | jq -C '.' 2>/dev/null || cat ~/.claude/settings.json" \
+            --preview-window=right:40%:wrap | cut -d' ' -f1 | read -r selected
+
+        if [[ -z "$selected" ]]; then
+            info "已取消"
+            return
+        fi
+    else
+        # 使用 bash select 作为后备
+        echo -e "\n${CYAN}📋 选择配置:${NC}"
+        echo
+
+        PS3=$'\n请选择 (输入数字): '
+        select opt in "${profiles[@]}"; do
+            if [[ -n "$opt" ]]; then
+                selected="$opt"
+                break
+            fi
+        done
+
+        if [[ -z "$selected" ]]; then
+            info "已取消"
+            return
+        fi
+    fi
+
+    # 如果选择的是"当前"，不需要切换
+    if [[ "$selected" == "当前" ]]; then
+        info "当前配置已在使用中"
+        return
+    fi
+
+    # 加载选中的配置
+    load_profile "$selected"
+}
+
+# 显示帮助
+show_help() {
+    cat << 'EOF'
+${CYAN}Claude Settings Profile Manager${NC}
+
+管理 ~/.claude/settings.json 的多个配置文件
+
+${YELLOW}用法:${NC}
+  claude-profile <命令> [参数]
+
+${YELLOW}命令:${NC}
+  ${GREEN}list, ls${NC}                     列出所有配置文件和备份
+  ${GREEN}save, s <名称>${NC}               保存当前配置为命名配置
+  ${GREEN}load, l <名称>${NC}               加载指定配置（会自动备份当前配置）
+  ${GREEN}switch, sw${NC}                   交互式切换配置（↑↓ 选择，支持 fzf）
+  ${GREEN}backup, b [名称]${NC}             备份当前配置（默认名称: auto）
+  ${GREEN}restore, r <名称>${NC}            从备份恢复
+  ${GREEN}show <名称>${NC}                  显示配置内容（名称留空显示当前配置）
+  ${GREEN}edit, e <名称>${NC}               编辑配置文件（名称留空编辑当前配置）
+  ${GREEN}diff <配置1> [配置2]${NC}         比较两个配置的差异
+  ${GREEN}delete, rm <名称>${NC}            删除指定配置
+  ${GREEN}help, h${NC}                      显示此帮助信息
+
+${YELLOW}示例:${NC}
+  claude-profile list                           # 列出所有配置
+  claude-profile save work                       # 保存当前配置为 "work"
+  claude-profile load work                       # 加载 "work" 配置
+  claude-profile switch                          # 交互式切换（推荐）
+  claude-profile backup                          # 创建自动备份
+  claude-profile restore auto_20240226_120000    # 恢复指定备份
+  claude-profile show work                       # 显示 "work" 配置内容
+
+${YELLOW}目录结构:${NC}
+  ~/.claude/settings.json        # 当前使用的配置
+  ~/.claude/profiles/             # 命名配置存储
+  ~/.claude/backups/              # 自动备份存储
+
+EOF
+}
+
+# 主函数
+main() {
+    local command="${1:-help}"
+    shift || true
+
+    case "$command" in
+        list|ls)
+            list_profiles
+            ;;
+        save|s)
+            [[ -z "${1:-}" ]] && { error "请指定配置名称"; exit 1; }
+            save_profile "$1"
+            ;;
+        load|l)
+            [[ -z "${1:-}" ]] && { error "请指定配置名称"; exit 1; }
+            load_profile "$1"
+            ;;
+        switch|sw)
+            switch_profile
+            ;;
+        backup|b)
+            backup_profile "${1:-}"
+            ;;
+        restore|r)
+            [[ -z "${1:-}" ]] && { error "请指定备份名称"; exit 1; }
+            restore_backup "$1"
+            ;;
+        diff)
+            [[ -z "${1:-}" ]] && { error "请指定要比较的配置名称"; exit 1; }
+            diff_profile "$1" "${2:-}"
+            ;;
+        delete|rm)
+            [[ -z "${1:-}" ]] && { error "请指定要删除的配置名称"; exit 1; }
+            delete_profile "$1"
+            ;;
+        show)
+            show_profile "${1:-当前}"
+            ;;
+        edit|e)
+            edit_profile "${1:-}"
+            ;;
+        help|h|--help|-h)
+            show_help
+            ;;
+        *)
+            error "未知命令: $command"
+            echo
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
