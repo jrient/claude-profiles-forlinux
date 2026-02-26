@@ -106,8 +106,21 @@ save_profile() {
 }
 
 # 加载配置
+# 默认只替换 env 字段，使用 --full 参数全量覆盖
 load_profile() {
-    local name="$1"
+    local full=false
+    local name=""
+
+    # 解析参数
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full) full=true; shift ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && { error "请指定配置名称"; exit 1; }
+
     init_dirs
     check_settings
 
@@ -125,9 +138,24 @@ load_profile() {
     cp "${SETTINGS_FILE}" "${backup}"
     info "已备份当前配置: before_load_${timestamp}"
 
-    # 加载新配置
-    cp "${source}" "${SETTINGS_FILE}"
-    success "配置 '${name}' 已加载"
+    if [[ "$full" == true ]]; then
+        # 全量覆盖
+        cp "${source}" "${SETTINGS_FILE}"
+        success "配置 '${name}' 已全量加载"
+    else
+        # 默认只替换 env 字段
+        local source_env
+        source_env=$(jq '.env // null' "$source" 2>/dev/null)
+
+        if [[ "$source_env" == "null" ]] || [[ -z "$source_env" ]]; then
+            warn "配置 '${name}' 中没有 env 字段，无需替换"
+            return
+        fi
+
+        jq --argjson env "$source_env" '.env = $env' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" \
+            && mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}"
+        success "配置 '${name}' 的 env 已加载（其他配置保持不变）"
+    fi
 }
 
 # 备份当前配置
@@ -262,6 +290,12 @@ edit_profile() {
 
 # 交互式切换配置
 switch_profile() {
+    local full_flag=""
+    if [[ "${1:-}" == "--full" ]]; then
+        full_flag="--full"
+        shift
+    fi
+
     init_dirs
     check_settings
 
@@ -347,7 +381,7 @@ switch_profile() {
     fi
 
     # 加载选中的配置
-    load_profile "$selected"
+    load_profile "$selected" $full_flag
 }
 
 # 显示帮助
@@ -363,8 +397,8 @@ ${YELLOW}用法:${NC}
 ${YELLOW}命令:${NC}
   ${GREEN}list, ls${NC}                     列出所有配置文件和备份
   ${GREEN}save, s <名称>${NC}               保存当前配置为命名配置
-  ${GREEN}load, l <名称>${NC}               加载指定配置（会自动备份当前配置）
-  ${GREEN}switch, sw${NC}                   交互式切换配置（↑↓ 选择，支持 fzf）
+  ${GREEN}load, l <名称> [--full]${NC}       加载指定配置的 env（--full 全量覆盖）
+  ${GREEN}switch, sw [--full]${NC}          交互式切换配置（默认只替换 env）
   ${GREEN}backup, b [名称]${NC}             备份当前配置（默认名称: auto）
   ${GREEN}restore, r <名称>${NC}            从备份恢复
   ${GREEN}show <名称>${NC}                  显示配置内容（名称留空显示当前配置）
@@ -404,11 +438,10 @@ main() {
             save_profile "$1"
             ;;
         load|l)
-            [[ -z "${1:-}" ]] && { error "请指定配置名称"; exit 1; }
-            load_profile "$1"
+            load_profile "$@"
             ;;
         switch|sw)
-            switch_profile
+            switch_profile "$@"
             ;;
         backup|b)
             backup_profile "${1:-}"
