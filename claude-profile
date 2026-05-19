@@ -338,18 +338,20 @@ switch_profile() {
         fi
 
         # 使用 fzf 选择
-        {
-            for i in "${!profiles[@]}"; do
-                local name="${profiles[$i]}"
-                local desc="${descriptions[$i]}"
-                printf "%s\033[90m # %s\033[0m\n" "$name" "$desc"
-            done
-        } | fzf --height=40% --layout=reverse --prompt="选择配置 > " \
-            --header="使用 ↑↓ 选择，Enter 确认，Esc 取消" \
-            --ansi --no-multi \
-            --bind="ctrl-y:execute-silent(echo {} | cut -d' ' -f1 | xargs -I {} echo -n {} | pbcopy 2>/dev/null || true)" \
-            --preview="echo {} | cut -d' ' -f1 | xargs -I NAME bash -c 'if [[ \"NAME\" == \"当前\" ]]; then cat ~/.claude/settings.json; else cat ~/.claude/profiles/NAME.json 2>/dev/null; fi' | jq -C '.' 2>/dev/null || cat ~/.claude/settings.json" \
-            --preview-window=right:40%:wrap | cut -d' ' -f1 | read -r selected
+        selected=$(
+            {
+                for i in "${!profiles[@]}"; do
+                    local name="${profiles[$i]}"
+                    local desc="${descriptions[$i]}"
+                    printf "%s\033[90m # %s\033[0m\n" "$name" "$desc"
+                done
+            } | fzf --height=40% --layout=reverse --prompt="选择配置 > " \
+                --header="使用 ↑↓ 选择，Enter 确认，Esc 取消" \
+                --ansi --no-multi \
+                --bind="ctrl-y:execute-silent(echo {} | cut -d' ' -f1 | xargs -I {} echo -n {} | pbcopy 2>/dev/null || true)" \
+                --preview="echo {} | cut -d' ' -f1 | xargs -I NAME bash -c 'if [[ \"NAME\" == \"当前\" ]]; then cat ~/.claude/settings.json; else cat ~/.claude/profiles/NAME.json 2>/dev/null; fi' | jq -C '.' 2>/dev/null || cat ~/.claude/settings.json" \
+                --preview-window=right:40%:wrap | cut -d' ' -f1
+        )
 
         if [[ -z "$selected" ]]; then
             info "已取消"
